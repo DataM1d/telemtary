@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"telemetry-engine/internal/models" // This is already here, which is good
 )
 
 type Scraper struct {
@@ -16,13 +17,13 @@ func NewScraper() *Scraper {
 	}
 }
 
-func (s *Scraper) ScrapeTarget(ctx context.Context, targetID int) (OptimizedMetric, error) {
+func (s *Scraper) ScrapeTarget(ctx context.Context, id int) (models.OptimizedMetric, error) {
 	url := "http://localhost:8081/metrics"
 
 	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return OptimizedMetric{}, err
+		return models.OptimizedMetric{}, err
 	}
 	defer resp.Body.Close()
 
@@ -33,12 +34,22 @@ func (s *Scraper) ScrapeTarget(ctx context.Context, targetID int) (OptimizedMetr
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return OptimizedMetric{}, err
+		return models.OptimizedMetric{}, err
 	}
 
-	return OptimizedMetric{
+	var metricType uint8
+	switch data.Type {
+	case "CPU":
+		metricType = models.CPU
+	case "MEMORY":
+		metricType = models.Memory
+	default:
+		metricType = models.CPU
+	}
+
+	return models.OptimizedMetric{
 		ID:    data.ID,
 		Value: data.Value,
-		Type:  uint8(CPU),
+		Type:  metricType,
 	}, nil
 }

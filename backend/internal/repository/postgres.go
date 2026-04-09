@@ -2,7 +2,7 @@ package repository
 
 import (
 	"context"
-	"telemetry-engine/internal/telemetry"
+	"telemetry-engine/internal/models"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -12,7 +12,7 @@ type PostgresRepo struct {
 	Pool *pgxpool.Pool
 }
 
-func (r *PostgresRepo) StoreBatch(ctx context.Context, metrics []telemetry.OptimizedMetric) error {
+func (r *PostgresRepo) StoreBatch(ctx context.Context, metrics []models.OptimizedMetric) error {
 	batch := &pgx.Batch{}
 
 	for _, m := range metrics {

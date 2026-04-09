@@ -1,8 +1,13 @@
-package middleware
+package models
 
 import (
 	"net/http"
 	"time"
+)
+
+const (
+	CPU uint8 = iota
+	Memory
 )
 
 type responseWriter struct {
@@ -26,4 +31,10 @@ func ObserverRequest(next http.Handler) http.Handler {
 
 		_ = duration
 	})
+}
+
+type OptimizedMetric struct {
+	ID    uint32
+	Value float64
+	Type  uint8
 }
