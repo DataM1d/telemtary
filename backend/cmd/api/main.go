@@ -21,7 +21,11 @@ var client = &http.Client{
 }
 
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
 }
 
 func worker(id int, jobs <-chan telemetry.Task, results chan<- telemetry.OptimizedMetric, wg *sync.WaitGroup, ctx context.Context) {
@@ -40,7 +44,6 @@ func worker(id int, jobs <-chan telemetry.Task, results chan<- telemetry.Optimiz
 			results <- metric
 			fmt.Printf("Worker %d fetched metrics from server %d\n", id, job.ID)
 		case <-ctx.Done():
-			fmt.Printf("Worker %d shutting down\n", id)
 			return
 		}
 	}
@@ -50,21 +53,21 @@ func startAggregator(ctx context.Context, results <-chan telemetry.OptimizedMetr
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	dbBatch := make([]telemetry.OptimizedMetric, 0, 100)
+
 	for {
 		select {
 		case res, ok := <-results:
-			if !ok {
-				return
-			}
-			buffer.Add(res)
-			dbBatch = append(dbBatch, res)
-			if len(dbBatch) >= 100 {
-				go func(b []telemetry.OptimizedMetric) {
-					if err := repo.StoreBatch(context.Background(), b); err != nil {
-						fmt.Printf("Database sync error: %v\n", err)
-					}
-				}(dbBatch)
-				dbBatch = make([]telemetry.OptimizedMetric, 0, 100)
+			if ok {
+				buffer.Add(res)
+				dbBatch = append(dbBatch, res)
+				if len(dbBatch) >= 100 {
+					go func(b []telemetry.OptimizedMetric) {
+						if err := repo.StoreBatch(context.Background(), b); err != nil {
+							fmt.Printf("Database sync error: %v\n", err)
+						}
+					}(dbBatch)
+					dbBatch = make([]telemetry.OptimizedMetric, 0, 100)
+				}
 			}
 		case <-ticker.C:
 			latest := buffer.GetAll()
@@ -81,16 +84,13 @@ func startAggregator(ctx context.Context, results <-chan telemetry.OptimizedMetr
 				})
 			}
 			out, err := proto.Marshal(batch)
-			if err != nil {
-				fmt.Println("Error marshaling", err)
-				continue
+			if err == nil {
+				hub.Broadcast(out)
 			}
-			hub.Broadcast(out)
 		case <-ctx.Done():
 			if len(dbBatch) > 0 {
 				repo.StoreBatch(context.Background(), dbBatch)
 			}
-			fmt.Println("Aggregator shutting down...")
 			return
 		}
 	}
@@ -99,6 +99,7 @@ func startAggregator(ctx context.Context, results <-chan telemetry.OptimizedMetr
 func runEngine() {
 	hub := telemetry.NewHub()
 	go hub.Run()
+
 	connStr := "postgres://postgres:password@localhost:5432/telemetry_db"
 	pool, err := pgxpool.New(context.Background(), connStr)
 	if err != nil {
@@ -106,7 +107,9 @@ func runEngine() {
 		return
 	}
 	defer pool.Close()
+
 	repo := &repository.PostgresRepo{Pool: pool}
+
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -115,29 +118,38 @@ func runEngine() {
 		hub.Register(conn)
 		fmt.Println("New 3D Dashboard connected")
 	})
-	go func() {
-		fmt.Println("Telemetry WebSocket server starting on :8080/ws")
-		http.ListenAndServe(":8080", nil)
-	}()
+
 	buffer := telemetry.NewRingBuffer(telemetry.MaxBufferSize)
 	jobs := make(chan telemetry.Task, 100)
 	results := make(chan telemetry.OptimizedMetric, 100)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
 	go startAggregator(ctx, results, buffer, hub, repo)
+
 	var wg sync.WaitGroup
 	for w := 1; w <= telemetry.WorkerCount; w++ {
 		wg.Add(1)
 		go worker(w, jobs, results, &wg, ctx)
 	}
-	for j := 1; j <= 500; j++ {
-		jobs <- telemetry.Task{ID: j}
+
+	go func() {
+		for j := 1; j <= 500; j++ {
+			jobs <- telemetry.Task{ID: j}
+		}
+		close(jobs)
+		wg.Wait()
+		close(results)
+		finalData := buffer.GetAll()
+		fmt.Printf("Engine Tasks Finished. Final Buffer Count: %d metrics.\n", len(finalData))
+		fmt.Println("Server remaining active for Dashboard...")
+	}()
+
+	fmt.Println("Telemetry WebSocket server starting on :8080/ws")
+	if err := http.ListenAndServe(":8080", nil); err != nil {
+		fmt.Printf("Server failure: %v\n", err)
 	}
-	close(jobs)
-	wg.Wait()
-	close(results)
-	finalData := buffer.GetAll()
-	fmt.Printf("Engine stopped. Final Buffer Count: %d metrics.\n", len(finalData))
 }
 
 func sliceExperiment() {
@@ -147,6 +159,7 @@ func sliceExperiment() {
 		juniorSlice = append(juniorSlice, telemetry.OptimizedMetric{ID: uint32(i)})
 	}
 	fmt.Printf("Junior Append Time: %v\n", time.Since(startJunior))
+
 	startSenior := time.Now()
 	seniorSlice := make([]telemetry.OptimizedMetric, 0, 100000)
 	for i := 0; i < 100000; i++ {
