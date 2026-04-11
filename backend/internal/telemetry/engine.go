@@ -108,7 +108,7 @@ func (e *Engine) dbWorker(ctx context.Context) {
 func (e *Engine) startAggregator(ctx context.Context) {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
-	dbBatch := slicePool.Get().([]models.OptimizedMetric) // Prefix with models.
+	dbBatch := slicePool.Get().([]models.OptimizedMetric)
 
 	for {
 		select {

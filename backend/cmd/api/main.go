@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"telemetry-engine/internal/middleware"
 	"telemetry-engine/internal/repository"
 	"telemetry-engine/internal/telemetry"
 	"time"
@@ -21,10 +22,8 @@ var upgrader = websocket.Upgrader{
 }
 
 func main() {
-	// 1. Logger Setup
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
-	// 2. Database Connection
 	pool, err := pgxpool.New(context.Background(), "postgres://postgres:password@localhost:5432/telemetry_db")
 	if err != nil {
 		slog.Error("db connection failed", "error", err)
@@ -32,33 +31,42 @@ func main() {
 	}
 	defer pool.Close()
 
-	// 3. Initialize Engine Components
 	hub := telemetry.NewHub()
 	repo := &repository.PostgresRepo{Pool: pool}
 	engine := telemetry.NewEngine(repo, hub)
 
-	// 4. Routes
-	http.Handle("/metrics", promhttp.Handler())
-	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+
+	mux.Handle("/metrics", promhttp.Handler())
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
+			slog.Error("websocket upgrade failed", "error", err)
 			return
 		}
 		hub.Register(conn)
 	})
 
-	// 5. Lifecycle Management
+	handler := middleware.MetricsMiddleware(mux)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	go hub.Run()
 	engine.Start(ctx)
 
-	server := &http.Server{Addr: ":8080"}
+	server := &http.Server{
+		Addr:         ":8080",
+		Handler:      handler,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+	}
+
 	go func() {
 		slog.Info("server starting", "port", 8080)
-		server.ListenAndServe()
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("listen and serve error", "error", err)
+		}
 	}()
 
-	// 6. Graceful Shutdown
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
@@ -67,7 +75,12 @@ func main() {
 	cancel()
 	engine.Stop()
 
-	shutdownCtx, _ := context.WithTimeout(context.Background(), 5*time.Second)
-	server.Shutdown(shutdownCtx)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		slog.Error("forced shutdown", "error", err)
+	}
+
 	slog.Info("goodbye")
 }
